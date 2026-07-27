@@ -50,7 +50,7 @@ export async function GET(req, { params }) {
 }
 
 export async function POST(req, { params }) {
-  let cost = 1;
+  let cost = 2;
   let creditsDeducted = false;
   let userId = null;
 
@@ -69,7 +69,14 @@ export async function POST(req, { params }) {
       return NextResponse.json({ error: "Message content is required" }, { status: 400 });
     }
 
-    // 1. Fetch user's credit balance
+    // Extract custom API key if present
+    const headerApiKey = req.headers.get("x-custom-api-key");
+    const customApiKey = headerApiKey || body.customApiKey || session.user.customApiKey || null;
+    const isUsingCustomKey = Boolean(customApiKey && customApiKey.trim().length > 0);
+
+    cost = isUsingCustomKey ? 0 : 2;
+
+    // 1. Fetch user's credit balance if using site credits
     const user = await prisma.user.findUnique({
       where: { id: userId },
     });
@@ -78,10 +85,7 @@ export async function POST(req, { params }) {
       return NextResponse.json({ error: "User profile not found in database" }, { status: 404 });
     }
 
-    // Enforce a strict flat fee of 2 credits per message as requested
-    cost = 2;
-
-    if (user.credits < cost) {
+    if (!isUsingCustomKey && user.credits < cost) {
       return NextResponse.json({ error: `Insufficient credits. This requires ${cost} credits but you only have ${user.credits} remaining.` }, { status: 402 });
     }
 
@@ -119,14 +123,16 @@ IMPORTANT:
 - You are roleplaying as ${chat.character.name}. Write your response directly in first-person as ${chat.character.name}.
 - Do NOT start your response with "User: ...", "${chat.character.name}: ...", or similar labels. Just output the dialogue itself.`;
 
-    // 3. Deduct credits first (Transaction protection)
-    await prisma.user.update({
-      where: { id: userId },
-      data: { credits: { decrement: cost } },
-    });
-    creditsDeducted = true;
+    // 3. Deduct credits first if not using custom key
+    if (!isUsingCustomKey && cost > 0) {
+      await prisma.user.update({
+        where: { id: userId },
+        data: { credits: { decrement: cost } },
+      });
+      creditsDeducted = true;
+    }
 
-    // 4. Save the User's submitted message to SQLite
+    // 4. Save the User's submitted message
     const userMessage = await prisma.message.create({
       data: {
         chatId: id,
@@ -136,10 +142,10 @@ IMPORTANT:
       },
     });
 
-    // 5. Connect to MuAPI to trigger upstream model generations
-    const apiKey = process.env.MU_API_KEY;
+    // 5. Connect to MuAPI
+    const apiKey = isUsingCustomKey ? customApiKey.trim() : process.env.MU_API_KEY;
     if (!apiKey) {
-      throw new Error("MuAPI key is missing in environment variables.");
+      throw new Error("API key is missing.");
     }
 
     // Select endpoint depending on whether an image was attached or not
@@ -173,7 +179,7 @@ IMPORTANT:
     if (!response.ok) {
       const errText = await response.text();
       console.error("[MUAPI_LLM_ERROR]", errText);
-      throw new Error(`Upstream MuAPI error: ${response.statusText}`);
+      throw new Error(`Upstream API error: ${response.statusText}`);
     }
 
     const data = await response.json();
@@ -183,7 +189,7 @@ IMPORTANT:
       throw new Error("Did not receive a request_id from upstream server.");
     }
 
-    // 6. Synchronous server-side polling loop to retrieve results (Infinite polling)
+    // 6. Synchronous server-side polling loop to retrieve results
     let completedText = "";
     let status = "processing";
     const tickDelay = 1500;
@@ -213,7 +219,7 @@ IMPORTANT:
           status = "completed"; // normalize
           break;
         } else if (status === "failed") {
-          throw new Error("Generation task failed on the upstream serverless system.");
+          throw new Error("Generation task failed on the upstream system.");
         }
       } else {
         console.warn(`[POLL_TICK_ERROR] Status code: ${checkRes.status}`);
@@ -232,7 +238,7 @@ IMPORTANT:
     return NextResponse.json({
       userMessage,
       assistantMessage,
-      remainingCredits: user.credits - cost,
+      remainingCredits: isUsingCustomKey ? "∞" : user.credits - cost,
     });
 
   } catch (error) {

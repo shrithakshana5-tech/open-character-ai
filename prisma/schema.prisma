@@ -39,6 +39,7 @@ model User {
   emailVerified DateTime?
   image         String?
   credits       Int         @default(50) // Seeds with 50 credits to try LLMs
+  customApiKey  String?     @db.Text
   accounts      Account[]
   sessions      Session[]
   chats         Chat[]
